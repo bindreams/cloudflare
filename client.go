@@ -84,14 +84,7 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 		}
 	}
 
-	reqURL := fmt.Sprintf("%s/zones/%s/dns_records?%s", baseURL, zoneInfo.ID, qs.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []cfDNSRecord
-	_, err = p.doAPIRequest(req, &results)
+	results, err := p.listDNSRecords(ctx, zoneInfo.ID, qs)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +101,38 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 	}
 
 	return results, nil
+}
+
+// listDNSRecords fetches all DNS records from Cloudflare matching qs,
+// transparently following pagination. qs is mutated to set page/per_page.
+func (p *Provider) listDNSRecords(ctx context.Context, zoneID string, qs url.Values) ([]cfDNSRecord, error) {
+	const maxPageSize = 100
+	var all []cfDNSRecord
+	for page := 1; ; page++ {
+		qs.Set("page", strconv.Itoa(page))
+		qs.Set("per_page", strconv.Itoa(maxPageSize))
+		reqURL := fmt.Sprintf("%s/zones/%s/dns_records?%s", baseURL, zoneID, qs.Encode())
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		var pageRecords []cfDNSRecord
+		response, err := p.doAPIRequest(req, &pageRecords)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, pageRecords...)
+		// Guard against missing or zero-size pagination metadata before
+		// dereferencing or dividing by it.
+		if len(pageRecords) == 0 || response.ResultInfo == nil || response.ResultInfo.PerPage == 0 {
+			break
+		}
+		lastPage := (response.ResultInfo.TotalCount + response.ResultInfo.PerPage - 1) / response.ResultInfo.PerPage
+		if page >= lastPage {
+			break
+		}
+	}
+	return all, nil
 }
 
 func (p *Provider) getZoneInfo(ctx context.Context, zoneName string) (cfZone, error) {
