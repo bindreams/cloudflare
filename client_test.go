@@ -23,7 +23,11 @@ func TestUnwrapContent(t *testing.T) {
 		{name: "two_segments", in: `"a" "b"`, want: "ab"},
 		{name: "no_separator", in: `"a""b"`, want: "ab"},
 		{name: "tab_separator", in: "\"a\"\t\"b\"", want: "ab"},
+		{name: "cr_separator", in: "\"a\"\r\"b\"", want: "ab"},
+		{name: "lf_separator", in: "\"a\"\n\"b\"", want: "ab"},
+		{name: "crlf_separator", in: "\"a\"\r\n\"b\"", want: "ab"},
 		{name: "multiple_space_separator", in: `"a"  "b"`, want: "ab"},
+		{name: "empty_leading_chunk", in: `"" "a"`, want: "a"},
 		{name: "escaped_quote", in: `"a\"b"`, want: `a"b`},
 		{name: "escaped_backslash", in: `"a\\b"`, want: `a\b`},
 		{
@@ -34,6 +38,7 @@ func TestUnwrapContent(t *testing.T) {
 		// Malformed inputs return as-is rather than panic.
 		{name: "unterminated_quote", in: `"abc`, want: `"abc`},
 		{name: "trailing_garbage", in: `"a" junk`, want: `"a" junk`},
+		{name: "invalid_hex_escape", in: `"\xZZ"`, want: `"\xZZ"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

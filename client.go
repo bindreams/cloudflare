@@ -207,11 +207,11 @@ const txtChunkSize = 255
 // unwrapContent decodes Cloudflare's stored TXT representation, which is one or
 // more double-quoted RFC 1035 §3.3.14 character-strings separated by whitespace,
 // into the concatenated byte sequence. Each segment is decoded with
-// [strconv.Unquote], the inverse of [fmt.Sprintf] %q, so backslash escapes
-// (including \xNN for non-printable bytes) round-trip correctly.
+// [strconv.Unquote], so backslash escapes that [fmt.Sprintf] %q emits (including
+// \xNN for non-printable bytes) round-trip correctly.
 //
-// If content doesn't look like quoted form (e.g. legacy or unexpected data),
-// it is returned unchanged.
+// If content doesn't look like quoted form (e.g. legacy or malformed data), or
+// if any segment fails to parse, it is returned unchanged.
 func unwrapContent(content string) string {
 	if !strings.HasPrefix(content, `"`) {
 		return content
@@ -220,7 +220,7 @@ func unwrapContent(content string) string {
 	sb.Grow(len(content))
 	i := 0
 	for i < len(content) {
-		for i < len(content) && (content[i] == ' ' || content[i] == '\t') {
+		for i < len(content) && isTXTSeparator(content[i]) {
 			i++
 		}
 		if i >= len(content) {
@@ -251,6 +251,12 @@ func unwrapContent(content string) string {
 		i = end + 1
 	}
 	return sb.String()
+}
+
+// isTXTSeparator reports whether b is one of the ASCII whitespace bytes that
+// can appear between character-strings in an RFC 1035 zone-file-style RDATA.
+func isTXTSeparator(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 
 // wrapContent encodes TXT content as one or more double-quoted RFC 1035 §3.3.14

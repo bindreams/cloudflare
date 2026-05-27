@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"strings"
 	"testing"
@@ -35,7 +37,12 @@ func TestCloudflareLongTXTRoundTrip(t *testing.T) {
 
 	// 410-byte DKIM-shaped value (matches issue reproduction).
 	value := "v=DKIM1; k=rsa; p=" + strings.Repeat("ABCDEFGH", 49)
-	name := "test-long-txt-roundtrip._domainkey"
+	// Randomize the name so parallel CI runs against the same zone don't collide.
+	var nonceBytes [4]byte
+	if _, err := rand.Read(nonceBytes[:]); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	name := "test-long-txt-" + hex.EncodeToString(nonceBytes[:]) + "._domainkey"
 	rec := libdns.TXT{Name: name, Text: value, TTL: 5 * time.Minute}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
