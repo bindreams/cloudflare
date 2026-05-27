@@ -104,9 +104,15 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 }
 
 // listDNSRecords fetches all DNS records from Cloudflare matching qs,
-// transparently following pagination. qs is mutated to set page/per_page.
+// transparently following pagination.
 func (p *Provider) listDNSRecords(ctx context.Context, zoneID string, qs url.Values) ([]cfDNSRecord, error) {
 	const maxPageSize = 100
+	// Shallow-clone qs so we don't mutate the caller's map when we Set page/per_page.
+	cloned := make(url.Values, len(qs)+2)
+	for k, v := range qs {
+		cloned[k] = v
+	}
+	qs = cloned
 	var all []cfDNSRecord
 	for page := 1; ; page++ {
 		qs.Set("page", strconv.Itoa(page))
@@ -233,17 +239,25 @@ const txtChunkSize = 255
 // more double-quoted RFC 1035 §3.3.14 character-strings separated by whitespace,
 // into the concatenated byte sequence. Each segment is decoded with
 // [strconv.Unquote], so backslash escapes that [fmt.Sprintf] %q emits (including
-// \xNN for non-printable bytes) round-trip correctly.
+// \xNN for non-printable bytes) round-trip correctly. The round-trip is stable
+// because [wrapContent] writes the stored form (Go-syntax %q) and Cloudflare
+// echoes it back unchanged.
 //
 // If content doesn't look like quoted form (e.g. legacy or malformed data), or
 // if any segment fails to parse, it is returned unchanged.
 func unwrapContent(content string) string {
-	if !strings.HasPrefix(content, `"`) {
+	// Skip any leading whitespace before deciding whether the content is in
+	// quoted form, so " \"foo\"" parses the same as "\"foo\"".
+	start := 0
+	for start < len(content) && isTXTSeparator(content[start]) {
+		start++
+	}
+	if start >= len(content) || content[start] != '"' {
 		return content
 	}
 	var sb strings.Builder
 	sb.Grow(len(content))
-	i := 0
+	i := start
 	for i < len(content) {
 		for i < len(content) && isTXTSeparator(content[i]) {
 			i++
@@ -289,6 +303,12 @@ func isTXTSeparator(b byte) bool {
 // (at byte boundaries — character-strings are byte-counted), each formatted
 // with %q and joined with a single space. Content up to [txtChunkSize] bytes
 // produces a single quoted segment, matching the wire format Cloudflare returns.
+//
+// Each chunk holds up to 255 decoded bytes; the %q-encoded JSON segment can be
+// substantially longer for content with non-printable bytes (each becomes a
+// 4-byte \xNN escape). This is correct per RFC 1035 (the 255-byte limit is on
+// decoded data) but unverified against Cloudflare's content-field length limit
+// for highly escape-dense inputs.
 func wrapContent(content string) string {
 	if len(content) <= txtChunkSize {
 		return fmt.Sprintf("%q", content)

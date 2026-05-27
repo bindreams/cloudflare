@@ -18,6 +18,10 @@ func TestUnwrapContent(t *testing.T) {
 	}{
 		{name: "empty", in: "", want: ""},
 		{name: "unquoted_legacy", in: "hello", want: "hello"},
+		{name: "whitespace_only", in: " ", want: " "},
+		{name: "leading_space", in: ` "foo"`, want: "foo"},
+		{name: "leading_tab", in: "\t\"foo\"", want: "foo"},
+		{name: "trailing_space", in: `"foo" `, want: "foo"},
 		{name: "single_segment", in: `"foo"`, want: "foo"},
 		{name: "empty_segment", in: `""`, want: ""},
 		{name: "two_segments", in: `"a" "b"`, want: "ab"},
@@ -98,26 +102,29 @@ func TestWrapUnwrapRoundTrip(t *testing.T) {
 	// at a chunk boundary still round-trips byte-identical.
 	straddle := strings.Repeat("a", 254) + "é" + "trail"
 
-	inputs := map[string]string{
-		"empty":                 "",
-		"short_ascii":           "hello",
-		"hello_world":           "Hello, world!",
-		"spf":                   "v=spf1 -all",
-		"exactly_255":           strings.Repeat("a", 255),
-		"256_bytes":             strings.Repeat("a", 256),
-		"510_bytes":             strings.Repeat("a", 510),
-		"dkim_410":              dkimSample,
-		"embedded_quote_bslash": `embedded "quote" and \ backslash`,
-		"raw_bytes":             "\xff\x00\x01 raw bytes",
-		"utf8_rune_straddle":    straddle,
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"empty", ""},
+		{"short_ascii", "hello"},
+		{"hello_world", "Hello, world!"},
+		{"spf", "v=spf1 -all"},
+		{"exactly_255", strings.Repeat("a", 255)},
+		{"256_bytes", strings.Repeat("a", 256)},
+		{"510_bytes", strings.Repeat("a", 510)},
+		{"dkim_410", dkimSample},
+		{"embedded_quote_bslash", `embedded "quote" and \ backslash`},
+		{"raw_bytes", "\xff\x00\x01 raw bytes"},
+		{"utf8_rune_straddle", straddle},
 	}
-	for name, in := range inputs {
-		t.Run(name, func(t *testing.T) {
-			wrapped := wrapContent(in)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := wrapContent(tc.in)
 			got := unwrapContent(wrapped)
-			if got != in {
+			if got != tc.in {
 				t.Errorf("round-trip failed:\n  input   (len %d) = %q\n  wrapped (len %d) = %q\n  got     (len %d) = %q",
-					len(in), in, len(wrapped), wrapped, len(got), got)
+					len(tc.in), tc.in, len(wrapped), wrapped, len(got), got)
 			}
 		})
 	}
