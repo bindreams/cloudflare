@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/libdns/libdns"
@@ -72,9 +73,10 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 	var unwrappedContent string
 	if matchContent {
 		if rr.Type == "TXT" {
+			// Match TXT locally on unwrapped content (see below) to be robust against
+			// Cloudflare's chunked wire format for records >255 bytes (RFC 1035 §3.3.14).
+			// Don't put the (potentially long) content into the URL filter.
 			unwrappedContent = unwrapContent(rr.Content)
-			// Use the contains (wildcard) search with unquoted content to return both quoted and unquoted content
-			qs.Set("content.contains", unwrappedContent)
 		} else if rr.Type != "SRV" && rr.Type != "HTTPS" && rr.Type != "SVCB" {
 			// SRV, HTTPS, SVCB records don't support content.exact filtering in Cloudflare API
 			// They will be matched by type and name only
@@ -90,27 +92,22 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 
 	var results []cfDNSRecord
 	_, err = p.doAPIRequest(req, &results)
+	if err != nil {
+		return nil, err
+	}
 
-	// Since the TXT search used contains (wildcard), check for exact matches
+	// TXT matching is structural (on unwrapped content) so it works regardless of
+	// whether the API returns chunked or single-segment form.
 	if matchContent && rr.Type == "TXT" {
-		for i := 0; i < len(results); i++ {
-			// Prefer exact quoted content
-			if results[i].Content == rr.Content {
+		for i := range results {
+			if unwrapContent(results[i].Content) == unwrappedContent {
 				return []cfDNSRecord{results[i]}, nil
 			}
 		}
-
-		for i := 0; i < len(results); i++ {
-			// Using exact unquoted content is acceptable
-			if results[i].Content == unwrappedContent {
-				return []cfDNSRecord{results[i]}, nil
-			}
-		}
-
 		return []cfDNSRecord{}, nil
 	}
 
-	return results, err
+	return results, nil
 }
 
 func (p *Provider) getZoneInfo(ctx context.Context, zoneName string) (cfZone, error) {
@@ -202,16 +199,80 @@ func (p *Provider) doAPIRequest(req *http.Request, result any) (cfResponse, erro
 
 const baseURL = "https://api.cloudflare.com/client/v4"
 
+// txtChunkSize is the maximum length of a single RFC 1035 §3.3.14 character-string.
+// TXT record content longer than this must be split into multiple character-strings
+// on the wire.
+const txtChunkSize = 255
+
+// unwrapContent decodes Cloudflare's stored TXT representation, which is one or
+// more double-quoted RFC 1035 §3.3.14 character-strings separated by whitespace,
+// into the concatenated byte sequence. Each segment is decoded with
+// [strconv.Unquote], the inverse of [fmt.Sprintf] %q, so backslash escapes
+// (including \xNN for non-printable bytes) round-trip correctly.
+//
+// If content doesn't look like quoted form (e.g. legacy or unexpected data),
+// it is returned unchanged.
 func unwrapContent(content string) string {
-	if strings.HasPrefix(content, `"`) && strings.HasSuffix(content, `"`) {
-		content = strings.TrimPrefix(strings.TrimSuffix(content, `"`), `"`)
+	if !strings.HasPrefix(content, `"`) {
+		return content
 	}
-	return content
+	var sb strings.Builder
+	sb.Grow(len(content))
+	i := 0
+	for i < len(content) {
+		for i < len(content) && (content[i] == ' ' || content[i] == '\t') {
+			i++
+		}
+		if i >= len(content) {
+			break
+		}
+		if content[i] != '"' {
+			return content
+		}
+		end := i + 1
+		for end < len(content) {
+			if content[end] == '\\' && end+1 < len(content) {
+				end += 2
+				continue
+			}
+			if content[end] == '"' {
+				break
+			}
+			end++
+		}
+		if end >= len(content) {
+			return content
+		}
+		seg, err := strconv.Unquote(content[i : end+1])
+		if err != nil {
+			return content
+		}
+		sb.WriteString(seg)
+		i = end + 1
+	}
+	return sb.String()
 }
 
+// wrapContent encodes TXT content as one or more double-quoted RFC 1035 §3.3.14
+// character-strings. Content longer than [txtChunkSize] is split into chunks
+// (at byte boundaries — character-strings are byte-counted), each formatted
+// with %q and joined with a single space. Content up to [txtChunkSize] bytes
+// produces a single quoted segment, matching the wire format Cloudflare returns.
 func wrapContent(content string) string {
-	if !strings.HasPrefix(content, `"`) && !strings.HasSuffix(content, `"`) {
-		content = fmt.Sprintf("%q", content)
+	if len(content) <= txtChunkSize {
+		return fmt.Sprintf("%q", content)
 	}
-	return content
+	var sb strings.Builder
+	sb.Grow(len(content) + (len(content)/txtChunkSize+1)*3)
+	for i := 0; i < len(content); i += txtChunkSize {
+		if i > 0 {
+			sb.WriteByte(' ')
+		}
+		end := i + txtChunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		fmt.Fprintf(&sb, "%q", content[i:end])
+	}
+	return sb.String()
 }
