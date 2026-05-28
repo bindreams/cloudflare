@@ -10,7 +10,7 @@ import (
 // https://github.com/libdns/cloudflare/issues/32.
 var dkimSample = "v=DKIM1; k=rsa; p=" + strings.Repeat("ABCDEFGH", 49)
 
-func TestUnwrapContent(t *testing.T) {
+func TestUnwrapTXTContent(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -46,16 +46,16 @@ func TestUnwrapContent(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := unwrapContent(tc.in)
+			got := unwrapTXTContent(tc.in)
 			if got != tc.want {
-				t.Errorf("unwrapContent(%q) = %q (len %d), want %q (len %d)",
+				t.Errorf("unwrapTXTContent(%q) = %q (len %d), want %q (len %d)",
 					tc.in, got, len(got), tc.want, len(tc.want))
 			}
 		})
 	}
 }
 
-func TestWrapContent(t *testing.T) {
+func TestWrapTXTContent(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -87,9 +87,9 @@ func TestWrapContent(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := wrapContent(tc.in)
+			got := wrapTXTContent(tc.in)
 			if got != tc.want {
-				t.Errorf("wrapContent(%q) = %q (len %d), want %q (len %d)",
+				t.Errorf("wrapTXTContent(%q) = %q (len %d), want %q (len %d)",
 					tc.in, got, len(got), tc.want, len(tc.want))
 			}
 		})
@@ -120,8 +120,8 @@ func TestWrapUnwrapRoundTrip(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			wrapped := wrapContent(tc.in)
-			got := unwrapContent(wrapped)
+			wrapped := wrapTXTContent(tc.in)
+			got := unwrapTXTContent(wrapped)
 			if got != tc.in {
 				t.Errorf("round-trip failed:\n  input   (len %d) = %q\n  wrapped (len %d) = %q\n  got     (len %d) = %q",
 					len(tc.in), tc.in, len(wrapped), wrapped, len(got), got)

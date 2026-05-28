@@ -76,7 +76,7 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 			// Match TXT locally on unwrapped content (see below) to be robust against
 			// Cloudflare's chunked wire format for records >255 bytes (RFC 1035 §3.3.14).
 			// Don't put the (potentially long) content into the URL filter.
-			unwrappedContent = unwrapContent(rr.Content)
+			unwrappedContent = unwrapTXTContent(rr.Content)
 		} else if rr.Type != "SRV" && rr.Type != "HTTPS" && rr.Type != "SVCB" {
 			// SRV, HTTPS, SVCB records don't support content.exact filtering in Cloudflare API
 			// They will be matched by type and name only
@@ -93,7 +93,7 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 	// whether the API returns chunked or single-segment form.
 	if matchContent && rr.Type == "TXT" {
 		for i := range results {
-			if unwrapContent(results[i].Content) == unwrappedContent {
+			if unwrapTXTContent(results[i].Content) == unwrappedContent {
 				return []cfDNSRecord{results[i]}, nil
 			}
 		}
@@ -235,17 +235,17 @@ const baseURL = "https://api.cloudflare.com/client/v4"
 // on the wire.
 const txtChunkSize = 255
 
-// unwrapContent decodes Cloudflare's stored TXT representation, which is one or
+// unwrapTXTContent decodes Cloudflare's stored TXT representation, which is one or
 // more double-quoted RFC 1035 §3.3.14 character-strings separated by whitespace,
 // into the concatenated byte sequence. Each segment is decoded with
 // [strconv.Unquote], so backslash escapes that [fmt.Sprintf] %q emits (including
 // \xNN for non-printable bytes) round-trip correctly. The round-trip is stable
-// because [wrapContent] writes the stored form (Go-syntax %q) and Cloudflare
+// because [wrapTXTContent] writes the stored form (Go-syntax %q) and Cloudflare
 // echoes it back unchanged.
 //
 // If content doesn't look like quoted form (e.g. legacy or malformed data), or
 // if any segment fails to parse, it is returned unchanged.
-func unwrapContent(content string) string {
+func unwrapTXTContent(content string) string {
 	// Skip any leading whitespace before deciding whether the content is in
 	// quoted form, so " \"foo\"" parses the same as "\"foo\"".
 	start := 0
@@ -298,7 +298,7 @@ func isTXTSeparator(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 
-// wrapContent encodes TXT content as one or more double-quoted RFC 1035 §3.3.14
+// wrapTXTContent encodes TXT content as one or more double-quoted RFC 1035 §3.3.14
 // character-strings. Content longer than [txtChunkSize] is split into chunks
 // (at byte boundaries — character-strings are byte-counted), each formatted
 // with %q and joined with a single space. Content up to [txtChunkSize] bytes
@@ -309,7 +309,7 @@ func isTXTSeparator(b byte) bool {
 // 4-byte \xNN escape). This is correct per RFC 1035 (the 255-byte limit is on
 // decoded data) but unverified against Cloudflare's content-field length limit
 // for highly escape-dense inputs.
-func wrapContent(content string) string {
+func wrapTXTContent(content string) string {
 	if len(content) <= txtChunkSize {
 		return fmt.Sprintf("%q", content)
 	}
