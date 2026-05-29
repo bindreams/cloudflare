@@ -235,16 +235,24 @@ const baseURL = "https://api.cloudflare.com/client/v4"
 // on the wire.
 const txtChunkSize = 255
 
-// unwrapTXTContent decodes Cloudflare's stored TXT representation, which is one or
-// more double-quoted RFC 1035 §3.3.14 character-strings separated by whitespace,
-// into the concatenated byte sequence. Each segment is decoded with
-// [strconv.Unquote], so backslash escapes that [fmt.Sprintf] %q emits (including
-// \xNN for non-printable bytes) round-trip correctly. The round-trip is stable
-// because [wrapTXTContent] writes the stored form (Go-syntax %q) and Cloudflare
-// echoes it back unchanged.
+// unwrapTXTContent decodes Cloudflare's stored TXT representation into the
+// concatenated byte sequence. Two on-the-wire forms are accepted:
 //
-// If content doesn't look like quoted form (e.g. legacy or malformed data), or
-// if any segment fails to parse, it is returned unchanged.
+//   - Quoted: one or more double-quoted RFC 1035 §3.3.14 character-strings
+//     separated by whitespace (the form Cloudflare returns for records created
+//     via its UI/API since it began auto-wrapping, and the form this provider
+//     now writes via [wrapTXTContent]). Each segment is decoded with
+//     [strconv.Unquote], so backslash escapes that [fmt.Sprintf] %q emits
+//     (including \xNN for non-printable bytes) round-trip correctly.
+//   - Unquoted: raw content, returned unchanged. Cloudflare's TXT auto-wrap
+//     applies "for new records" only (per their DNS-record-types docs); records
+//     created before that change — including everything this provider wrote
+//     before PR #24 (2025-06-02) — are still at rest in unquoted form and the
+//     API returns them as such.
+//
+// Malformed input (unterminated quote, garbage after a segment, unparseable
+// escape) is also returned unchanged; this is defensive — the documented
+// Cloudflare contract should never produce it.
 func unwrapTXTContent(content string) string {
 	// Skip any leading whitespace before deciding whether the content is in
 	// quoted form, so " \"foo\"" parses the same as "\"foo\"".
