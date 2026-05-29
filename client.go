@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/libdns/libdns"
@@ -72,9 +73,10 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 	var unwrappedContent string
 	if matchContent {
 		if rr.Type == "TXT" {
-			unwrappedContent = unwrapContent(rr.Content)
-			// Use the contains (wildcard) search with unquoted content to return both quoted and unquoted content
-			qs.Set("content.contains", unwrappedContent)
+			// Match TXT locally on unwrapped content (see below) to be robust against
+			// Cloudflare's chunked wire format for records >255 bytes (RFC 1035 §3.3.14).
+			// Don't put the (potentially long) content into the URL filter.
+			unwrappedContent = unwrapTXTContent(rr.Content)
 		} else if rr.Type != "SRV" && rr.Type != "HTTPS" && rr.Type != "SVCB" {
 			// SRV, HTTPS, SVCB records don't support content.exact filtering in Cloudflare API
 			// They will be matched by type and name only
@@ -82,35 +84,61 @@ func (p *Provider) getDNSRecords(ctx context.Context, zoneInfo cfZone, rec libdn
 		}
 	}
 
-	reqURL := fmt.Sprintf("%s/zones/%s/dns_records?%s", baseURL, zoneInfo.ID, qs.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	results, err := p.listDNSRecords(ctx, zoneInfo.ID, qs)
 	if err != nil {
 		return nil, err
 	}
 
-	var results []cfDNSRecord
-	_, err = p.doAPIRequest(req, &results)
-
-	// Since the TXT search used contains (wildcard), check for exact matches
+	// TXT matching is structural (on unwrapped content) so it works regardless of
+	// whether the API returns chunked or single-segment form.
 	if matchContent && rr.Type == "TXT" {
-		for i := 0; i < len(results); i++ {
-			// Prefer exact quoted content
-			if results[i].Content == rr.Content {
+		for i := range results {
+			if unwrapTXTContent(results[i].Content) == unwrappedContent {
 				return []cfDNSRecord{results[i]}, nil
 			}
 		}
-
-		for i := 0; i < len(results); i++ {
-			// Using exact unquoted content is acceptable
-			if results[i].Content == unwrappedContent {
-				return []cfDNSRecord{results[i]}, nil
-			}
-		}
-
 		return []cfDNSRecord{}, nil
 	}
 
-	return results, err
+	return results, nil
+}
+
+// listDNSRecords fetches all DNS records from Cloudflare matching qs,
+// transparently following pagination.
+func (p *Provider) listDNSRecords(ctx context.Context, zoneID string, qs url.Values) ([]cfDNSRecord, error) {
+	const maxPageSize = 100
+	// Shallow-clone qs so we don't mutate the caller's map when we Set page/per_page.
+	cloned := make(url.Values, len(qs)+2)
+	for k, v := range qs {
+		cloned[k] = v
+	}
+	qs = cloned
+	var all []cfDNSRecord
+	for page := 1; ; page++ {
+		qs.Set("page", strconv.Itoa(page))
+		qs.Set("per_page", strconv.Itoa(maxPageSize))
+		reqURL := fmt.Sprintf("%s/zones/%s/dns_records?%s", baseURL, zoneID, qs.Encode())
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		var pageRecords []cfDNSRecord
+		response, err := p.doAPIRequest(req, &pageRecords)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, pageRecords...)
+		// Guard against missing or zero-size pagination metadata before
+		// dereferencing or dividing by it.
+		if len(pageRecords) == 0 || response.ResultInfo == nil || response.ResultInfo.PerPage == 0 {
+			break
+		}
+		lastPage := (response.ResultInfo.TotalCount + response.ResultInfo.PerPage - 1) / response.ResultInfo.PerPage
+		if page >= lastPage {
+			break
+		}
+	}
+	return all, nil
 }
 
 func (p *Provider) getZoneInfo(ctx context.Context, zoneName string) (cfZone, error) {
@@ -202,16 +230,108 @@ func (p *Provider) doAPIRequest(req *http.Request, result any) (cfResponse, erro
 
 const baseURL = "https://api.cloudflare.com/client/v4"
 
-func unwrapContent(content string) string {
-	if strings.HasPrefix(content, `"`) && strings.HasSuffix(content, `"`) {
-		content = strings.TrimPrefix(strings.TrimSuffix(content, `"`), `"`)
+// txtChunkSize is the maximum length of a single RFC 1035 §3.3.14 character-string.
+// TXT record content longer than this must be split into multiple character-strings
+// on the wire.
+const txtChunkSize = 255
+
+// unwrapTXTContent decodes Cloudflare's stored TXT representation into the
+// concatenated byte sequence. Two on-the-wire forms are accepted:
+//
+//   - Quoted: one or more double-quoted RFC 1035 §3.3.14 character-strings
+//     separated by whitespace (the form Cloudflare returns for records created
+//     via its UI/API since it began auto-wrapping, and the form this provider
+//     now writes via [wrapTXTContent]). Each segment is decoded with
+//     [strconv.Unquote], so backslash escapes that [fmt.Sprintf] %q emits
+//     (including \xNN for non-printable bytes) round-trip correctly.
+//   - Unquoted: raw content, returned unchanged. Cloudflare's TXT auto-wrap
+//     applies "for new records" only (per their DNS-record-types docs); records
+//     created before that change — including everything this provider wrote
+//     before PR #24 (2025-06-02) — are still at rest in unquoted form and the
+//     API returns them as such.
+//
+// Malformed input (unterminated quote, garbage after a segment, unparseable
+// escape) is also returned unchanged; this is defensive — the documented
+// Cloudflare contract should never produce it.
+func unwrapTXTContent(content string) string {
+	// Skip any leading whitespace before deciding whether the content is in
+	// quoted form, so " \"foo\"" parses the same as "\"foo\"".
+	start := 0
+	for start < len(content) && isTXTSeparator(content[start]) {
+		start++
 	}
-	return content
+	if start >= len(content) || content[start] != '"' {
+		return content
+	}
+	var sb strings.Builder
+	sb.Grow(len(content))
+	i := start
+	for i < len(content) {
+		for i < len(content) && isTXTSeparator(content[i]) {
+			i++
+		}
+		if i >= len(content) {
+			break
+		}
+		if content[i] != '"' {
+			return content
+		}
+		end := i + 1
+		for end < len(content) {
+			if content[end] == '\\' && end+1 < len(content) {
+				end += 2
+				continue
+			}
+			if content[end] == '"' {
+				break
+			}
+			end++
+		}
+		if end >= len(content) {
+			return content
+		}
+		seg, err := strconv.Unquote(content[i : end+1])
+		if err != nil {
+			return content
+		}
+		sb.WriteString(seg)
+		i = end + 1
+	}
+	return sb.String()
 }
 
-func wrapContent(content string) string {
-	if !strings.HasPrefix(content, `"`) && !strings.HasSuffix(content, `"`) {
-		content = fmt.Sprintf("%q", content)
+// isTXTSeparator reports whether b is one of the ASCII whitespace bytes that
+// can appear between character-strings in an RFC 1035 zone-file-style RDATA.
+func isTXTSeparator(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+// wrapTXTContent encodes TXT content as one or more double-quoted RFC 1035 §3.3.14
+// character-strings. Content longer than [txtChunkSize] is split into chunks
+// (at byte boundaries — character-strings are byte-counted), each formatted
+// with %q and joined with a single space. Content up to [txtChunkSize] bytes
+// produces a single quoted segment, matching the wire format Cloudflare returns.
+//
+// Each chunk holds up to 255 decoded bytes; the %q-encoded JSON segment can be
+// substantially longer for content with non-printable bytes (each becomes a
+// 4-byte \xNN escape). This is correct per RFC 1035 (the 255-byte limit is on
+// decoded data) but unverified against Cloudflare's content-field length limit
+// for highly escape-dense inputs.
+func wrapTXTContent(content string) string {
+	if len(content) <= txtChunkSize {
+		return fmt.Sprintf("%q", content)
 	}
-	return content
+	var sb strings.Builder
+	sb.Grow(len(content) + (len(content)/txtChunkSize+1)*3)
+	for i := 0; i < len(content); i += txtChunkSize {
+		if i > 0 {
+			sb.WriteByte(' ')
+		}
+		end := i + txtChunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		fmt.Fprintf(&sb, "%q", content[i:end])
+	}
+	return sb.String()
 }

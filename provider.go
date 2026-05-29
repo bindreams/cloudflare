@@ -37,35 +37,9 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 		return nil, err
 	}
 
-	page := 1
-	const maxPageSize = 100
-
-	var allRecords []cfDNSRecord
-	for {
-		qs := make(url.Values)
-		qs.Set("page", fmt.Sprintf("%d", page))
-		qs.Set("per_page", fmt.Sprintf("%d", maxPageSize))
-		reqURL := fmt.Sprintf("%s/zones/%s/dns_records?%s", baseURL, zoneInfo.ID, qs.Encode())
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		var pageRecords []cfDNSRecord
-		response, err := p.doAPIRequest(req, &pageRecords)
-		if err != nil {
-			return nil, err
-		}
-
-		allRecords = append(allRecords, pageRecords...)
-
-		lastPage := (response.ResultInfo.TotalCount + response.ResultInfo.PerPage - 1) / response.ResultInfo.PerPage
-		if response.ResultInfo == nil || page >= lastPage || len(pageRecords) == 0 {
-			break
-		}
-
-		page++
+	allRecords, err := p.listDNSRecords(ctx, zoneInfo.ID, url.Values{})
+	if err != nil {
+		return nil, err
 	}
 
 	recs := make([]libdns.Record, 0, len(allRecords))

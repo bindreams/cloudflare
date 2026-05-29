@@ -199,7 +199,7 @@ func (r cfDNSRecord) libdnsRecord(zone string) (libdns.Record, error) {
 		return rr.Parse()
 	case "TXT":
 		// unwrap the quotes from the content
-		unwrappedContent := unwrapContent(r.Content)
+		unwrappedContent := unwrapTXTContent(r.Content)
 		return libdns.TXT{
 			Name: name,
 			TTL:  ttl,
@@ -295,7 +295,7 @@ func cloudflareRecord(r libdns.Record) (cfDNSRecord, error) {
 	}
 	if rr.Type == "TXT" {
 		// wrap the content in quotes
-		cfRec.Content = wrapContent(cfRec.Content)
+		cfRec.Content = wrapTXTContent(cfRec.Content)
 	}
 	return cfRec, nil
 }
